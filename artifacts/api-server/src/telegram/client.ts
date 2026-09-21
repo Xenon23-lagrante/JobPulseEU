@@ -28,6 +28,17 @@ export type TelegramUpdate = {
   message?: TelegramMessage;
 };
 
+export type TelegramReplyMarkup =
+  | {
+      keyboard: string[][];
+      resize_keyboard?: boolean;
+      one_time_keyboard?: boolean;
+      is_persistent?: boolean;
+    }
+  | {
+      remove_keyboard: true;
+    };
+
 export class TelegramClient {
   private readonly baseUrl: string;
 
@@ -50,11 +61,16 @@ export class TelegramClient {
     });
   }
 
-  async sendMessage(chatId: number, text: string): Promise<TelegramMessage> {
+  async sendMessage(
+    chatId: number,
+    text: string,
+    options?: { replyMarkup?: TelegramReplyMarkup },
+  ): Promise<TelegramMessage> {
     return this.call<TelegramMessage>("sendMessage", {
       chat_id: chatId,
       text,
       disable_web_page_preview: true,
+      ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
     });
   }
 

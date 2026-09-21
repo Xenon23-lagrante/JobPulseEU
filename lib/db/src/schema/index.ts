@@ -1,20 +1,92 @@
-// Export your models here. Add one export per file
-// export * from "./posts";
-//
-// Each model/table should ideally be split into different files.
-// Each model/table should define a Drizzle table, insert schema, and types:
-//
-//   import { pgTable, text, serial } from "drizzle-orm/pg-core";
-//   import { createInsertSchema } from "drizzle-zod";
-//   import { z } from "zod/v4";
-//
-//   export const postsTable = pgTable("posts", {
-//     id: serial("id").primaryKey(),
-//     title: text("title").notNull(),
-//   });
-//
-//   export const insertPostSchema = createInsertSchema(postsTable).omit({ id: true });
-//   export type InsertPost = z.infer<typeof insertPostSchema>;
-//   export type Post = typeof postsTable.$inferSelect;
+import { relations, sql } from "drizzle-orm";
+import {
+  bigint,
+  boolean,
+  integer,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
-export {}
+export const usersTable = pgTable(
+  "users",
+  {
+    id: serial("id").primaryKey(),
+    telegramId: bigint("telegram_id", { mode: "number" }).notNull(),
+    username: text("username"),
+    firstName: text("first_name"),
+    paused: boolean("paused").notNull().default(false),
+    stopped: boolean("stopped").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    telegramIdIndex: uniqueIndex("users_telegram_id_idx").on(table.telegramId),
+  }),
+);
+
+export const userPreferencesTable = pgTable(
+  "user_preferences",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => usersTable.id, { onDelete: "cascade" }),
+    jobSector: text("job_sector"),
+    contractTypes: text("contract_types")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::text[]`),
+    countries: text("countries")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::text[]`),
+    locations: text("locations")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::text[]`),
+    notificationFrequency: text("notification_frequency")
+      .notNull()
+      .default("immediate"),
+    setupStep: text("setup_step").notNull().default("job_sector"),
+    configured: boolean("configured").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    userIdIndex: uniqueIndex("user_preferences_user_id_idx").on(table.userId),
+  }),
+);
+
+export const usersRelations = relations(usersTable, ({ one }) => ({
+  preferences: one(userPreferencesTable),
+}));
+
+export const userPreferencesRelations = relations(
+  userPreferencesTable,
+  ({ one }) => ({
+    user: one(usersTable, {
+      fields: [userPreferencesTable.userId],
+      references: [usersTable.id],
+    }),
+  }),
+);
+
+export type User = typeof usersTable.$inferSelect;
+export type UserPreferences = typeof userPreferencesTable.$inferSelect;
+export type UserPreferencesUpdate = Partial<
+  Omit<
+    typeof userPreferencesTable.$inferInsert,
+    "id" | "userId" | "createdAt" | "updatedAt"
+  >
+>;
