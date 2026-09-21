@@ -27,6 +27,11 @@ const HELP_MESSAGE = `JobAlert — commandes disponibles
 /contrat — modifier le type de contrat
 /pays — modifier les pays
 /lieux — modifier les villes ou régions
+/niveau — modifier le niveau d'études
+/salaire — modifier le salaire minimum
+/teletravail — modifier le télétravail
+/langues — modifier les langues
+/debut — modifier la date de début
 /alertes — modifier la fréquence des alertes
 /pause — suspendre les notifications
 /reprendre — reprendre les notifications
@@ -70,11 +75,33 @@ const FREQUENCY_CHOICES = [
   { label: "📅 1 fois par semaine", value: "weekly" },
 ] as const;
 
+const EDUCATION_CHOICES = [
+  { label: "🎓 Bac", value: "Bac" },
+  { label: "🎓 Bac+2", value: "Bac+2" },
+  { label: "🎓 Bac+3", value: "Bac+3" },
+  { label: "🎓 Bac+4", value: "Bac+4" },
+  { label: "🎓 Bac+5", value: "Bac+5" },
+  { label: "🎓 Doctorat", value: "Doctorat" },
+  { label: "🌍 Peu importe", value: "Peu importe" },
+] as const;
+
+const REMOTE_WORK_CHOICES = [
+  { label: "🏠 Télétravail", value: "remote" },
+  { label: "🔄 Hybride", value: "hybrid" },
+  { label: "🏢 Sur site", value: "onsite" },
+  { label: "🌍 Peu importe", value: "any" },
+] as const;
+
 const EDIT_CHOICES = [
   "💼 Métier",
   "📋 Contrats",
   "🌍 Pays",
   "📍 Lieux",
+  "🎓 Niveau d'études",
+  "💰 Salaire minimum",
+  "🏠 Télétravail",
+  "🗣️ Langues",
+  "📅 Date de début",
   "🔔 Alertes",
   "✅ Terminer",
 ];
@@ -96,6 +123,11 @@ type SetupStep =
   | "location_choice"
   | "location_custom"
   | "location_region"
+  | "education_level"
+  | "minimum_salary"
+  | "remote_work"
+  | "languages"
+  | "start_date"
   | "notification_frequency"
   | "edit_menu"
   | "complete";
@@ -131,8 +163,25 @@ function frequencyLabel(value: string): string {
   );
 }
 
+function educationLabel(value: string | null): string {
+  return (
+    EDUCATION_CHOICES.find((choice) => choice.value === value)?.label ??
+    value ??
+    "Non renseigné"
+  );
+}
+
+function remoteWorkLabel(value: string | null): string {
+  return (
+    REMOTE_WORK_CHOICES.find((choice) => choice.value === value)?.label ??
+    "Non renseigné"
+  );
+}
+
 function listOrDefault(values: string[], defaultText: string): string {
-  return values.length > 0 ? values.map((value) => `• ${value}`).join("\n") : defaultText;
+  return values.length > 0
+    ? values.map((value) => `• ${value}`).join("\n")
+    : defaultText;
 }
 
 export class JobAlertBot {
@@ -290,6 +339,21 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       case "/lieux":
         await this.beginEditing(chatId, user, "location_choice");
         return;
+      case "/niveau":
+        await this.beginEditing(chatId, user, "education_level");
+        return;
+      case "/salaire":
+        await this.beginEditing(chatId, user, "minimum_salary");
+        return;
+      case "/teletravail":
+        await this.beginEditing(chatId, user, "remote_work");
+        return;
+      case "/langues":
+        await this.beginEditing(chatId, user, "languages");
+        return;
+      case "/debut":
+        await this.beginEditing(chatId, user, "start_date");
+        return;
       case "/alertes":
         await this.beginEditing(chatId, user, "notification_frequency");
         return;
@@ -343,23 +407,68 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         await this.saveJobSector(message.chat.id, user, text);
         return;
       case "contract_types":
-        await this.handleContractChoice(message.chat.id, user, preferences, text);
+        await this.handleContractChoice(
+          message.chat.id,
+          user,
+          preferences,
+          text,
+        );
         return;
       case "countries":
-        await this.handleCountryChoice(message.chat.id, user, preferences, text);
+        await this.handleCountryChoice(
+          message.chat.id,
+          user,
+          preferences,
+          text,
+        );
         return;
       case "country_custom":
         await this.saveCustomCountry(message.chat.id, user, preferences, text);
         return;
       case "location_choice":
-        await this.handleLocationChoice(message.chat.id, user, preferences, text);
+        await this.handleLocationChoice(
+          message.chat.id,
+          user,
+          preferences,
+          text,
+        );
         return;
       case "location_custom":
       case "location_region":
         await this.saveLocation(message.chat.id, user, preferences, text);
         return;
+      case "education_level":
+        await this.handleEducationChoice(
+          message.chat.id,
+          user,
+          preferences,
+          text,
+        );
+        return;
+      case "minimum_salary":
+        await this.saveMinimumSalary(message.chat.id, user, preferences, text);
+        return;
+      case "remote_work":
+        await this.handleRemoteWorkChoice(
+          message.chat.id,
+          user,
+          preferences,
+          text,
+        );
+        return;
+      case "languages":
+        await this.saveLanguages(message.chat.id, user, preferences, text);
+        return;
+      case "start_date":
+        await this.saveStartDate(message.chat.id, user, preferences, text);
+        return;
       case "notification_frequency":
-        await this.handleFrequencyChoice(message.chat.id, user, preferences, text);
+        await this.handleFrequencyChoice(
+          message.chat.id,
+          user,
+          preferences,
+          text,
+        );
         return;
       case "edit_menu":
         await this.handleEditChoice(message.chat.id, user, text);
@@ -383,7 +492,11 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       configured: false,
       setupStep: step,
     });
-    await this.sendCurrentSetupPrompt(chatId, user, await ensureUserPreferences(user.id));
+    await this.sendCurrentSetupPrompt(
+      chatId,
+      user,
+      await ensureUserPreferences(user.id),
+    );
   }
 
   private async saveJobSector(
@@ -432,8 +545,8 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const choice = CONTRACT_CHOICES.find(
-      (candidate) => buttonMatches(text, candidate.label),
+    const choice = CONTRACT_CHOICES.find((candidate) =>
+      buttonMatches(text, candidate.label),
     );
     if (!choice) {
       await this.client.sendMessage(
@@ -517,8 +630,8 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const choice = COUNTRY_CHOICES.find(
-      (candidate) => buttonMatches(text, candidate.label),
+    const choice = COUNTRY_CHOICES.find((candidate) =>
+      buttonMatches(text, candidate.label),
     );
     if (!choice) {
       await this.sendCountryPrompt(chatId, preferences);
@@ -587,9 +700,9 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     if (normalized === normalize("🌍 Tout le pays")) {
       const next = await updateUserPreferences(user.id, {
         locations: [],
-        setupStep: "notification_frequency",
+        setupStep: "education_level",
       });
-      await this.sendFrequencyPrompt(chatId, next);
+      await this.sendEducationPrompt(chatId, next);
       return;
     }
 
@@ -615,9 +728,9 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
 
     if (normalized === normalize("✅ Terminer")) {
       const next = await updateUserPreferences(user.id, {
-        setupStep: "notification_frequency",
+        setupStep: "education_level",
       });
-      await this.sendFrequencyPrompt(chatId, next);
+      await this.sendEducationPrompt(chatId, next);
       return;
     }
 
@@ -645,6 +758,265 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       setupStep: "location_choice",
     });
     await this.sendLocationPrompt(chatId, next);
+  }
+
+  private async sendEducationPrompt(
+    chatId: number,
+    preferences: UserPreferences,
+  ): Promise<void> {
+    await this.client.sendMessage(
+      chatId,
+      `🎓 Quel est ton niveau d'études ?\n\nNiveau actuel : ${educationLabel(
+        preferences.educationLevel,
+      )}\n\nCe critère est facultatif.`,
+      {
+        replyMarkup: keyboard([
+          ...EDUCATION_CHOICES.map((choice) => [choice.label]),
+          ["⏭️ Ignorer"],
+        ]),
+      },
+    );
+  }
+
+  private async handleEducationChoice(
+    chatId: number,
+    user: User,
+    preferences: UserPreferences,
+    text: string,
+  ): Promise<void> {
+    const choice = EDUCATION_CHOICES.find((candidate) =>
+      buttonMatches(text, candidate.label),
+    );
+    const changes =
+      normalize(text) === normalize("⏭️ Ignorer")
+        ? { educationLevel: null, setupStep: "minimum_salary" as const }
+        : choice
+          ? {
+              educationLevel: choice.value,
+              setupStep: "minimum_salary" as const,
+            }
+          : null;
+
+    if (!changes) {
+      await this.sendEducationPrompt(chatId, preferences);
+      return;
+    }
+
+    const next = await updateUserPreferences(user.id, changes);
+    await this.sendMinimumSalaryPrompt(chatId, next);
+  }
+
+  private async sendMinimumSalaryPrompt(
+    chatId: number,
+    preferences: UserPreferences,
+  ): Promise<void> {
+    const current =
+      preferences.minimumSalary === null
+        ? "Non renseigné"
+        : `${preferences.minimumSalary} €`;
+    await this.client.sendMessage(
+      chatId,
+      `💰 Quel salaire minimum souhaites-tu ?\n\nMinimum actuel : ${current}\n\nÉcris un montant en euros, par exemple « 1800 ». Ce critère est facultatif.`,
+      { replyMarkup: keyboard([["⏭️ Ignorer"]]) },
+    );
+  }
+
+  private async saveMinimumSalary(
+    chatId: number,
+    user: User,
+    preferences: UserPreferences,
+    value: string,
+  ): Promise<void> {
+    if (normalize(value) === normalize("⏭️ Ignorer")) {
+      const next = await updateUserPreferences(user.id, {
+        minimumSalary: null,
+        setupStep: "remote_work",
+      });
+      await this.sendRemoteWorkPrompt(chatId, next);
+      return;
+    }
+
+    const numericValue = Number.parseInt(value.replace(/[^\d]/g, ""), 10);
+    if (
+      !Number.isSafeInteger(numericValue) ||
+      numericValue <= 0 ||
+      numericValue > 10_000_000
+    ) {
+      await this.client.sendMessage(
+        chatId,
+        "Indique un montant en euros supérieur à 0, par exemple « 1800 », ou choisis « ⏭️ Ignorer ».",
+        { replyMarkup: keyboard([["⏭️ Ignorer"]]) },
+      );
+      return;
+    }
+
+    const next = await updateUserPreferences(user.id, {
+      minimumSalary: numericValue,
+      setupStep: "remote_work",
+    });
+    await this.sendRemoteWorkPrompt(chatId, next);
+  }
+
+  private async sendRemoteWorkPrompt(
+    chatId: number,
+    preferences: UserPreferences,
+  ): Promise<void> {
+    await this.client.sendMessage(
+      chatId,
+      `🏠 Quel mode de travail préfères-tu ?\n\nMode actuel : ${remoteWorkLabel(
+        preferences.remoteWork,
+      )}\n\nCe critère est facultatif.`,
+      {
+        replyMarkup: keyboard([
+          ...REMOTE_WORK_CHOICES.map((choice) => [choice.label]),
+          ["⏭️ Ignorer"],
+        ]),
+      },
+    );
+  }
+
+  private async handleRemoteWorkChoice(
+    chatId: number,
+    user: User,
+    preferences: UserPreferences,
+    text: string,
+  ): Promise<void> {
+    const choice = REMOTE_WORK_CHOICES.find((candidate) =>
+      buttonMatches(text, candidate.label),
+    );
+    const changes =
+      normalize(text) === normalize("⏭️ Ignorer")
+        ? { remoteWork: null, setupStep: "languages" as const }
+        : choice
+          ? {
+              remoteWork: choice.value,
+              setupStep: "languages" as const,
+            }
+          : null;
+
+    if (!changes) {
+      await this.sendRemoteWorkPrompt(chatId, preferences);
+      return;
+    }
+
+    const next = await updateUserPreferences(user.id, changes);
+    await this.sendLanguagesPrompt(chatId, next);
+  }
+
+  private async sendLanguagesPrompt(
+    chatId: number,
+    preferences: UserPreferences,
+  ): Promise<void> {
+    await this.client.sendMessage(
+      chatId,
+      `🗣️ Quelles langues maîtrises-tu ?\n\nLangues actuelles : ${listOrDefault(
+        preferences.languages,
+        "Non renseignées",
+      )}\n\nÉcris-les séparées par des virgules, par exemple « français, anglais ». Ce critère est facultatif.`,
+      { replyMarkup: keyboard([["⏭️ Ignorer"]]) },
+    );
+  }
+
+  private async saveLanguages(
+    chatId: number,
+    user: User,
+    preferences: UserPreferences,
+    value: string,
+  ): Promise<void> {
+    if (normalize(value) === normalize("⏭️ Ignorer")) {
+      const next = await updateUserPreferences(user.id, {
+        languages: [],
+        setupStep: "start_date",
+      });
+      await this.sendStartDatePrompt(chatId, next);
+      return;
+    }
+
+    const languages = [
+      ...new Map(
+        value
+          .split(/[,;\n]+/)
+          .map((language) => language.trim().slice(0, 50))
+          .filter((language) => language.length >= 2)
+          .map((language) => [normalize(language), language] as const),
+      ).values(),
+    ].slice(0, 10);
+    if (languages.length === 0) {
+      await this.client.sendMessage(
+        chatId,
+        "Indique au moins une langue, séparée par des virgules, ou choisis « ⏭️ Ignorer ».",
+        { replyMarkup: keyboard([["⏭️ Ignorer"]]) },
+      );
+      return;
+    }
+
+    const next = await updateUserPreferences(user.id, {
+      languages,
+      setupStep: "start_date",
+    });
+    await this.sendStartDatePrompt(chatId, next);
+  }
+
+  private async sendStartDatePrompt(
+    chatId: number,
+    preferences: UserPreferences,
+  ): Promise<void> {
+    await this.client.sendMessage(
+      chatId,
+      `📅 À partir de quelle date peux-tu commencer ?\n\nDate actuelle: ${
+        preferences.startDate ?? "Non renseignée"
+      }\n\nUtilise le format AAAA-MM-JJ. Ce critère est facultatif.`,
+      { replyMarkup: keyboard([["⏭️ Ignorer"]]) },
+    );
+  }
+
+  private async saveStartDate(
+    chatId: number,
+    user: User,
+    preferences: UserPreferences,
+    value: string,
+  ): Promise<void> {
+    const trimmedValue = value.trim();
+    if (normalize(trimmedValue) === normalize("⏭️ Ignorer")) {
+      const next = await updateUserPreferences(user.id, {
+        startDate: null,
+        setupStep: "notification_frequency",
+      });
+      await this.sendFrequencyPrompt(chatId, next);
+      return;
+    }
+
+    if (!this.isValidCalendarDate(trimmedValue)) {
+      await this.client.sendMessage(
+        chatId,
+        "Indique une date valide au format AAAA-MM-JJ, par exemple « 2026-10-01 », ou choisis « ⏭️ Ignorer ».",
+        { replyMarkup: keyboard([["⏭️ Ignorer"]]) },
+      );
+      return;
+    }
+
+    const next = await updateUserPreferences(user.id, {
+      startDate: trimmedValue,
+      setupStep: "notification_frequency",
+    });
+    await this.sendFrequencyPrompt(chatId, next);
+  }
+
+  private isValidCalendarDate(value: string): boolean {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!match) {
+      return false;
+    }
+
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    return (
+      date.getUTCFullYear() === year &&
+      date.getUTCMonth() === month - 1 &&
+      date.getUTCDate() === day
+    );
   }
 
   private async sendFrequencyPrompt(
@@ -704,6 +1076,11 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       ["📋 Contrats", "contract_types"],
       ["🌍 Pays", "countries"],
       ["📍 Lieux", "location_choice"],
+      ["🎓 Niveau d'études", "education_level"],
+      ["💰 Salaire minimum", "minimum_salary"],
+      ["🏠 Télétravail", "remote_work"],
+      ["🗣️ Langues", "languages"],
+      ["📅 Date de début", "start_date"],
       ["🔔 Alertes", "notification_frequency"],
     ];
     const selected = steps.find(([label]) => normalize(label) === normalized);
@@ -743,11 +1120,9 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    await this.client.sendMessage(
-      chatId,
-      "Choisis une section à modifier.",
-      { replyMarkup: keyboard([EDIT_CHOICES]) },
-    );
+    await this.client.sendMessage(chatId, "Choisis une section à modifier.", {
+      replyMarkup: keyboard([EDIT_CHOICES]),
+    });
   }
 
   private async sendCurrentSetupPrompt(
@@ -774,11 +1149,9 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         await this.sendCountryPrompt(chatId, preferences);
         return;
       case "country_custom":
-        await this.client.sendMessage(
-          chatId,
-          "Écris le nom d'un pays.",
-          { replyMarkup: REMOVE_KEYBOARD },
-        );
+        await this.client.sendMessage(chatId, "Écris le nom d'un pays.", {
+          replyMarkup: REMOVE_KEYBOARD,
+        });
         return;
       case "location_choice":
         await this.sendLocationPrompt(chatId, preferences);
@@ -790,6 +1163,21 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
           "Écris le nom d'une ville ou d'une région.",
           { replyMarkup: REMOVE_KEYBOARD },
         );
+        return;
+      case "education_level":
+        await this.sendEducationPrompt(chatId, preferences);
+        return;
+      case "minimum_salary":
+        await this.sendMinimumSalaryPrompt(chatId, preferences);
+        return;
+      case "remote_work":
+        await this.sendRemoteWorkPrompt(chatId, preferences);
+        return;
+      case "languages":
+        await this.sendLanguagesPrompt(chatId, preferences);
+        return;
+      case "start_date":
+        await this.sendStartDatePrompt(chatId, preferences);
         return;
       case "notification_frequency":
         await this.sendFrequencyPrompt(chatId, preferences);
@@ -830,10 +1218,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     ]);
   }
 
-  private formatPreferences(
-    preferences: UserPreferences,
-    user: User,
-  ): string {
+  private formatPreferences(preferences: UserPreferences, user: User): string {
     const status = user.stopped
       ? "arrêtées"
       : user.paused
@@ -853,6 +1238,21 @@ ${listOrDefault(preferences.countries, "Non renseigné")}
 
 📍 Lieux :
 ${listOrDefault(preferences.locations, "Tout le pays")}
+
+🎓 Niveau d'études :
+${educationLabel(preferences.educationLevel)}
+
+💰 Salaire minimum :
+${preferences.minimumSalary === null ? "Non renseigné" : `${preferences.minimumSalary} €`}
+
+🏠 Télétravail :
+${remoteWorkLabel(preferences.remoteWork)}
+
+🗣️ Langues :
+${listOrDefault(preferences.languages, "Non renseignées")}
+
+📅 Date de début :
+${preferences.startDate ?? "Non renseignée"}
 
 🔔 Alertes :
 ${frequencyLabel(preferences.notificationFrequency)}

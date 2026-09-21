@@ -2,6 +2,7 @@ import { relations, sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
+  date,
   integer,
   pgTable,
   serial,
@@ -51,6 +52,14 @@ export const userPreferencesTable = pgTable(
       .array()
       .notNull()
       .default(sql`ARRAY[]::text[]`),
+    educationLevel: text("education_level"),
+    minimumSalary: integer("minimum_salary"),
+    remoteWork: text("remote_work"),
+    languages: text("languages")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::text[]`),
+    startDate: date("start_date", { mode: "string" }),
     notificationFrequency: text("notification_frequency")
       .notNull()
       .default("immediate"),
@@ -89,4 +98,4 @@ export type UserPreferencesUpdate = Partial<
     typeof userPreferencesTable.$inferInsert,
     "id" | "userId" | "createdAt" | "updatedAt"
   >
->;
+ >;
