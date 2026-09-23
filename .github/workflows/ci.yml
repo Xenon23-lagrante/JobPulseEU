@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: jpa
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: jpa
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jpa" --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U jpa && break || sleep 1
+          done
+
+      - name: Apply migrations
+        env:
+          PGPASSWORD: pass
+        run: |
+          for f in lib/db/migrations/*.sql; do
+            echo "Applying $f";
+            psql -h localhost -U jpa -d jpa -f "$f";
+          done
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgres://jpa:pass@localhost:5432/jpa
+        run: npx tsx --test

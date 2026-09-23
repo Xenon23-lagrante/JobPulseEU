@@ -5,6 +5,11 @@ import {
   upsertTelegramUser,
   type User,
   type UserPreferences,
+  db,
+  jobsTable,
+  hasJobBeenNotified,
+  recordUserJobNotification,
+  selectAllSourceStatuses,
 } from "@workspace/db";
 import { logger } from "../lib/logger";
 import {
@@ -188,9 +193,11 @@ export class JobAlertBot {
   private readonly client: TelegramClient;
   private running = false;
   private offset = 0;
-
-  constructor(token: string) {
+  private offerPages: Map<number, { jobs: any[]; index: number }> = new Map();
+  private dbAny: any;
+  constructor(token: string, opts?: { db?: any }) {
     this.client = new TelegramClient(token);
+    this.dbAny = opts?.db ?? undefined;
   }
 
   async start(): Promise<void> {
@@ -234,7 +241,7 @@ export class JobAlertBot {
     }
 
     try {
-      const user = await upsertTelegramUser({
+      const user = await (this.dbAny?.upsertTelegramUser ?? upsertTelegramUser)({
         telegramId: message.from?.id ?? message.chat.id,
         username: message.from?.username,
         firstName: message.from?.first_name,
@@ -264,7 +271,7 @@ export class JobAlertBot {
 
     switch (command) {
       case "/start": {
-        const preferences = await ensureUserPreferences(user.id);
+        const preferences = await (this.dbAny?.ensureUserPreferences ?? ensureUserPreferences)(user.id);
         if (preferences.configured) {
           await this.client.sendMessage(
             chatId,
@@ -287,15 +294,56 @@ export class JobAlertBot {
         });
         return;
       case "/offres":
-        await this.client.sendMessage(
-          chatId,
-          `La recherche d'offres sera activée après la connexion des premières sources.
+        {
+          const preferences = await (this.dbAny?.ensureUserPreferences ?? ensureUserPreferences)(user.id);
+          if (!preferences.configured) {
+            await this.client.sendMessage(chatId, "Ta recherche n'est pas encore terminée. Utilise /start pour la configurer.");
+            return;
+          }
 
-Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réellement récupérées.`,
-        );
-        return;
+          if (user.paused || user.stopped) {
+            await this.client.sendMessage(chatId, "Ton compte est en pause ou arrêté. Utilise /reprendre pour réactiver les notifications.");
+            return;
+          }
+
+          // load jobs and match
+          let allJobs: any[] = [];
+          if (this.dbAny && Array.isArray((this.dbAny as any).__jobs)) {
+            allJobs = (this.dbAny as any).__jobs;
+          } else if (typeof db !== "undefined" && db) {
+            allJobs = await db.select().from(jobsTable).orderBy(jobsTable.publishedAt.desc).limit(200);
+          } else {
+            allJobs = [];
+          }
+          const { matchJobToPreferences } = await import("../../../../lib/jobs/src/services/matching.js");
+          const matches: any[] = [];
+          for (const j of allJobs) {
+            try {
+              const m = matchJobToPreferences(j as any, preferences as any);
+              if (m.outcome === "no_match" || m.outcome === "insufficient") continue;
+              const already = await (this.dbAny?.hasJobBeenNotified ?? hasJobBeenNotified)(user.id, j.id as number);
+              if (already) continue;
+              matches.push(j);
+            } catch (e) {
+              // ignore per-job errors
+            }
+          }
+
+          if (matches.length === 0) {
+            await this.client.sendMessage(
+              chatId,
+              "Aucune offre récente ne correspond à ta recherche. Tu peux modifier tes critères avec /modifier ou attendre que de nouvelles offres arrivent.",
+            );
+            return;
+          }
+
+          // store pagination state and send first page (one offer)
+          this.offerPages.set(user.id, { jobs: matches, index: 0 });
+          await this.sendOfferPage(chatId, user.id);
+          return;
+        }
       case "/preferences": {
-        const preferences = await ensureUserPreferences(user.id);
+        const preferences = await (this.dbAny?.ensureUserPreferences ?? ensureUserPreferences)(user.id);
         if (!preferences.configured) {
           await this.client.sendMessage(
             chatId,
@@ -313,7 +361,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         return;
       }
       case "/modifier": {
-        const preferences = await ensureUserPreferences(user.id);
+        const preferences = await (this.dbAny?.ensureUserPreferences ?? ensureUserPreferences)(user.id);
         await updateUserPreferences(user.id, {
           configured: false,
           setupStep: "edit_menu",
@@ -358,7 +406,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         await this.beginEditing(chatId, user, "notification_frequency");
         return;
       case "/pause":
-        await updateUserNotificationState(user.id, {
+        await (this.dbAny?.updateUserNotificationState ?? updateUserNotificationState)(user.id, {
           paused: true,
           stopped: user.stopped,
         });
@@ -368,7 +416,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         );
         return;
       case "/reprendre":
-        await updateUserNotificationState(user.id, {
+        await (this.dbAny?.updateUserNotificationState ?? updateUserNotificationState)(user.id, {
           paused: false,
           stopped: false,
         });
@@ -378,7 +426,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         );
         return;
       case "/stop":
-        await updateUserNotificationState(user.id, {
+        await (this.dbAny?.updateUserNotificationState ?? updateUserNotificationState)(user.id, {
           paused: true,
           stopped: true,
         });
@@ -387,6 +435,50 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
           "Notifications arrêtées. Utilise /reprendre pour les réactiver.",
         );
         return;
+      case "/admin_sources": {
+        const adminList = (process.env.ADMIN_TELEGRAM_IDS ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => Number(s));
+
+        if (!adminList.includes(user.telegramId)) {
+          await this.client.sendMessage(chatId, "Accès refusé.");
+          return;
+        }
+
+        try {
+          const rows = this.dbAny && this.dbAny.selectAllSourceStatuses ? await this.dbAny.selectAllSourceStatuses() : await selectAllSourceStatuses();
+          if (!rows || rows.length === 0) {
+            await this.client.sendMessage(chatId, "Aucun statut de source disponible.");
+            return;
+          }
+
+          const parts: string[] = [];
+          for (const r of rows) {
+            parts.push(
+              `• ${r.name} (${r.sourceId}) — ${r.country ?? "-"} — ${r.enabled ? "enabled" : "disabled"} — ${r.status}\n  lastRun: ${r.lastRunAt ?? "-"} lastSuccess: ${r.lastSuccessAt ?? "-"} lastError: ${r.lastErrorAt ?? "-"} fetched: ${r.lastCountFetched ?? 0} new: ${r.lastCountNew ?? 0} rejected: ${r.lastCountRejected ?? 0}`,
+            );
+          }
+
+          // split into chunks of ~3000 chars to respect Telegram limits
+          const chunkSize = 3000;
+          let buffer = "";
+          for (const line of parts) {
+            if ((buffer + "\n" + line).length > chunkSize) {
+              await this.client.sendMessage(chatId, buffer);
+              buffer = line;
+            } else {
+              buffer = buffer ? buffer + "\n" + line : line;
+            }
+          }
+          if (buffer) await this.client.sendMessage(chatId, buffer);
+        } catch (err) {
+          await this.client.sendMessage(chatId, "Impossible de récupérer les statuts des sources.");
+        }
+
+        return;
+      }
       default:
         await this.client.sendMessage(
           chatId,
@@ -399,8 +491,18 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     message: TelegramMessage,
     user: User,
   ): Promise<void> {
-    const preferences = await ensureUserPreferences(user.id);
+    const preferences = await (this.dbAny?.ensureUserPreferences ?? ensureUserPreferences)(user.id);
     const text = message.text?.trim() ?? "";
+
+    // quick pagination controls for /offres
+    if (text === "Offre suivante") {
+      await this.sendNextOffer(message.chat.id, user.id);
+      return;
+    }
+    if (text === "Actualiser") {
+      await this.handleCommand(message, "/offres", user);
+      return;
+    }
 
     switch (preferences.setupStep as SetupStep) {
       case "job_sector":
@@ -488,7 +590,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     step: SetupStep,
   ): Promise<void> {
     await ensureUserPreferences(user.id);
-    await updateUserPreferences(user.id, {
+    await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       configured: false,
       setupStep: step,
     });
@@ -512,7 +614,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const preferences = await updateUserPreferences(user.id, {
+    const preferences = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       jobSector: value.slice(0, 160),
       setupStep: "contract_types",
     });
@@ -538,7 +640,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         return;
       }
 
-      const next = await updateUserPreferences(user.id, {
+      const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
         setupStep: "countries",
       });
       await this.sendCountryPrompt(chatId, next);
@@ -571,7 +673,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       preferences.contractTypes.includes(choice.value)
         ? values.filter((value) => value !== choice.value)
         : values;
-    const next = await updateUserPreferences(user.id, {
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       contractTypes: updatedValues,
     });
     await this.client.sendMessage(
@@ -613,7 +715,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         return;
       }
 
-      const next = await updateUserPreferences(user.id, {
+      const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
         setupStep: "location_choice",
       });
       await this.sendLocationPrompt(chatId, next);
@@ -621,7 +723,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     }
 
     if (normalize(text) === normalize("✏️ Choisir moi-même")) {
-      await updateUserPreferences(user.id, { setupStep: "country_custom" });
+      await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, { setupStep: "country_custom" });
       await this.client.sendMessage(
         chatId,
         "Écris le nom d'un pays. Tu pourras ensuite en ajouter d'autres.",
@@ -649,7 +751,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
             ),
             choice.value,
           ];
-    const next = await updateUserPreferences(user.id, { countries: values });
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, { countries: values });
     await this.sendCountryPrompt(chatId, next);
   }
 
@@ -669,7 +771,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     )
       ? preferences.countries
       : [...preferences.countries, value.slice(0, 80)];
-    const next = await updateUserPreferences(user.id, {
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       countries,
       setupStep: "countries",
     });
@@ -707,7 +809,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     }
 
     if (normalized === normalize("📍 Ajouter une ville")) {
-      await updateUserPreferences(user.id, { setupStep: "location_custom" });
+      await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, { setupStep: "location_custom" });
       await this.client.sendMessage(
         chatId,
         "Écris le nom d'une ville. Tu pourras en ajouter d'autres.",
@@ -717,7 +819,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     }
 
     if (normalized === normalize("🗺️ Ajouter une région")) {
-      await updateUserPreferences(user.id, { setupStep: "location_region" });
+      await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, { setupStep: "location_region" });
       await this.client.sendMessage(
         chatId,
         "Écris le nom d'une région. Tu pourras en ajouter d'autres.",
@@ -727,7 +829,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     }
 
     if (normalized === normalize("✅ Terminer")) {
-      const next = await updateUserPreferences(user.id, {
+      const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
         setupStep: "education_level",
       });
       await this.sendEducationPrompt(chatId, next);
@@ -802,7 +904,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const next = await updateUserPreferences(user.id, changes);
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, changes);
     await this.sendMinimumSalaryPrompt(chatId, next);
   }
 
@@ -828,7 +930,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
     value: string,
   ): Promise<void> {
     if (normalize(value) === normalize("⏭️ Ignorer")) {
-      const next = await updateUserPreferences(user.id, {
+      const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
         minimumSalary: null,
         setupStep: "remote_work",
       });
@@ -850,7 +952,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const next = await updateUserPreferences(user.id, {
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       minimumSalary: numericValue,
       setupStep: "remote_work",
     });
@@ -899,7 +1001,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const next = await updateUserPreferences(user.id, changes);
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, changes);
     await this.sendLanguagesPrompt(chatId, next);
   }
 
@@ -950,7 +1052,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const next = await updateUserPreferences(user.id, {
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       languages,
       setupStep: "start_date",
     });
@@ -995,11 +1097,62 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
       return;
     }
 
-    const next = await updateUserPreferences(user.id, {
+    const next = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
       startDate: trimmedValue,
       setupStep: "notification_frequency",
     });
     await this.sendFrequencyPrompt(chatId, next);
+  }
+
+  private formatOfferMessage(job: any) {
+    const lines: string[] = [];
+    lines.push(`✳️ ${job.title}`);
+    if (job.company) lines.push(`🏢 ${job.company}`);
+    const loc = [job.city, job.region, job.country].filter(Boolean).join(", ");
+    if (loc) lines.push(`📍 ${loc}`);
+    if (job.contractTypes && job.contractTypes.length > 0) lines.push(`📄 ${job.contractTypes.join(", ")}`);
+    if (job.educationLevel) lines.push(`🎓 ${job.educationLevel}`);
+    if (job.salaryMin) lines.push(`💰 ${job.salaryMin}${job.salaryCurrency ? ` ${job.salaryCurrency}` : ""}`);
+    if (job.remoteWork) lines.push(`🏠 ${job.remoteWork}`);
+    if (job.languages && job.languages.length > 0) lines.push(`🗣️ ${job.languages.join(", ")}`);
+    lines.push(`🔗 ${job.url}`);
+    return lines.join("\n");
+  }
+
+  private async sendOfferPage(chatId: number, userId: number) {
+    const page = this.offerPages.get(userId);
+    if (!page) {
+      await this.client.sendMessage(chatId, "Aucune offre en cache. Utilise /offres pour lancer une recherche.");
+      return;
+    }
+    const job = page.jobs[page.index];
+    if (!job) {
+      await this.client.sendMessage(chatId, "Plus d'offres disponibles.");
+      return;
+    }
+
+    const message = this.formatOfferMessage(job);
+    await this.client.sendMessage(chatId, message, { replyMarkup: keyboard([["Offre suivante", "Actualiser"]]) });
+    // advance index for next call
+    page.index = Math.min(page.index + 1, page.jobs.length - 1);
+    this.offerPages.set(userId, page);
+  }
+
+  private async sendNextOffer(chatId: number, userId: number) {
+    const page = this.offerPages.get(userId);
+    if (!page) {
+      await this.client.sendMessage(chatId, "Aucune offre en cache. Utilise /offres pour lancer une recherche.");
+      return;
+    }
+    const job = page.jobs[page.index];
+    if (!job) {
+      await this.client.sendMessage(chatId, "Plus d'offres disponibles.");
+      return;
+    }
+    const message = this.formatOfferMessage(job);
+    await this.client.sendMessage(chatId, message, { replyMarkup: keyboard([["Offre suivante", "Actualiser"]]) });
+    page.index = Math.min(page.index + 1, page.jobs.length - 1);
+    this.offerPages.set(userId, page);
   }
 
   private isValidCalendarDate(value: string): boolean {
@@ -1105,7 +1258,7 @@ Aucune offre n'est simulée : JobAlert t'indiquera uniquement des offres réelle
         return;
       }
 
-      const updatedPreferences = await updateUserPreferences(user.id, {
+      const updatedPreferences = await (this.dbAny?.updateUserPreferences ?? updateUserPreferences)(user.id, {
         configured: true,
         setupStep: "complete",
       });
